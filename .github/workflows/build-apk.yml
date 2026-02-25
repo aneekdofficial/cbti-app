@@ -1,0 +1,118 @@
+name: Build CBTI APK
+
+# ── GitHub Secrets to add (Settings → Secrets and variables → Actions) ────────
+# ADMIN_PASS          your admin vault password
+# EMAILJS_PUBLIC_KEY  from emailjs.com → Account → API Keys
+# EMAILJS_TEMPLATE_ID your EmailJS template ID
+# EMAILJS_SERVICE_ID  your EmailJS service ID
+# (Firebase config is hardcoded in firebase.js — it's a public client identifier)
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    env:
+      ADMIN_USER:          cbti
+      ADMIN_PASS:          ${{ secrets.ADMIN_PASS }}
+      EMAILJS_PUBLIC_KEY:  ${{ secrets.EMAILJS_PUBLIC_KEY }}
+      EMAILJS_TEMPLATE_ID: ${{ secrets.EMAILJS_TEMPLATE_ID }}
+      EMAILJS_SERVICE_ID:  ${{ secrets.EMAILJS_SERVICE_ID }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Node ────────────────────────────────────────────────────────────────
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ── Java ────────────────────────────────────────────────────────────────
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # ── Android NDK ─────────────────────────────────────────────────────────
+      # ubuntu-latest ships with Android SDK. We only need NDK 26.1 for RN 0.74.
+      - name: Install Android NDK 26.1
+        run: |
+          echo "y" | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager \
+            "ndk;26.1.10909125" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      # ── JS dependencies ─────────────────────────────────────────────────────
+      - name: Install Expo CLI
+        run: npm install -g @expo/cli
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      # ── Generate native Android project ─────────────────────────────────────
+      # Expo Prebuild generates the /android folder from app.config.js.
+      # app.config.js reads env vars above and bakes them into the bundle.
+      - name: Expo Prebuild
+        run: npx expo prebuild --platform android --clean --no-install
+        env:
+          EXPO_NO_TELEMETRY: 1
+
+      - name: Make Gradlew executable
+        run: chmod +x android/gradlew
+
+      # ── Gradle cache ─────────────────────────────────────────────────────────
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # ── Build Release APK ────────────────────────────────────────────────────
+      # assembleRelease automatically bundles JS via the React Native Gradle plugin
+      # (BUNDLE_IN_RELEASE=true by default). The resulting APK is fully standalone —
+      # no Metro server needed. This is why we use Release, not Debug.
+      - name: Build Release APK
+        run: cd android && ./gradlew assembleRelease --no-daemon
+        env:
+          GRADLE_OPTS: "-Xmx4096m -XX:MaxMetaspaceSize=512m"
+
+      # ── Publish ──────────────────────────────────────────────────────────────
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CBTI-App-Release
+          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: CBTI App v${{ github.run_number }}
+          body: |
+            ## CBTI — Foundry for Minds
+            Auto-built APK — fully self-contained, installs directly on Android.
+
+            ### Install
+            1. Download **app-release-unsigned.apk** below
+            2. Enable **Install from unknown sources** in Android settings
+            3. Tap the file to install
+          files: android/app/build/outputs/apk/release/app-release-unsigned.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
